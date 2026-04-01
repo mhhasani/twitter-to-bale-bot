@@ -24,6 +24,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 from webdriver_manager.chrome import ChromeDriverManager
 
 COOKIES_FILE = Path(__file__).parent / "twitter_cookies.json"
+SEARCH_URL = "https://x.com/search?q=lang%3Afa%20min_faves%3A750%20-filter%3Areplies&src=typed_query&f=live"
 
 _driver: webdriver.Chrome | None = None
 _lock = threading.Lock()
@@ -72,11 +73,11 @@ def _build_driver() -> webdriver.Chrome:
         except Exception:
             pass
 
-    driver.refresh()
+    driver.get(SEARCH_URL)
     time.sleep(3)
     driver.execute_script("localStorage.setItem('night_mode', '2')")
 
-    print(f"[driver] URL بعد از refresh: {driver.current_url}")
+    print(f"[driver] URL بعد از init: {driver.current_url}")
     return driver
 
 
@@ -114,6 +115,24 @@ def _has_persian(text: str) -> bool:
     return bool(re.search(r"[\u0600-\u06FF]", text))
 
 
+def _wait_for_images(driver, article, timeout: float = 8.0) -> None:
+    """صبر کن تا همه img داخل article لود بشن (video نادیده گرفته میشه)."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        all_loaded = driver.execute_script("""
+            var imgs = arguments[0].querySelectorAll('img');
+            for (var i = 0; i < imgs.length; i++) {
+                var img = imgs[i];
+                if (!img.complete || img.naturalWidth === 0) return false;
+            }
+            return true;
+        """, article)
+        if all_loaded:
+            return
+        time.sleep(0.3)
+    print("  [warn] تایم‌اوت لود تصاویر")
+
+
 def screenshot_timeline(seen: set) -> list[list[tuple[str, bytes]]]:
     """
     تایملاین رو لود می‌کنه، توییت‌های فارسی که در seen نیستن رو اسکرین‌شات می‌گیره.
@@ -124,7 +143,6 @@ def screenshot_timeline(seen: set) -> list[list[tuple[str, bytes]]]:
 
     with _lock:
         driver = _get_driver()
-        SEARCH_URL = "https://x.com/search?q=lang%3Afa%20min_faves%3A750%20-filter%3Areplies&src=typed_query&f=live"
         print("[timeline] لود صفحه جستجوی فارسی ...")
         driver.get(SEARCH_URL)
         print(f"[timeline] URL: {driver.current_url}")
@@ -142,11 +160,13 @@ def screenshot_timeline(seen: set) -> list[list[tuple[str, bytes]]]:
         time.sleep(5)  # صبر اضافه برای لود رسانه‌ها
 
         processed = set()
-        for scroll_i in range(5):
+        for scroll_i in range(2):
             batch: list[tuple[str, bytes]] = []
+
+            # فاز ۱: فقط tid‌ها رو collect کن (قبل از هر scrollIntoView)
             articles = driver.find_elements(By.CSS_SELECTOR, "article[data-testid='tweet']")
             print(f"[scroll {scroll_i + 1}] {len(articles)} article در DOM")
-
+            new_tids = []
             for article in articles:
                 try:
                     tid = _tweet_id_from_article(article)
@@ -155,6 +175,26 @@ def screenshot_timeline(seen: set) -> list[list[tuple[str, bytes]]]:
                 if not tid or tid in seen or tid in processed:
                     continue
                 processed.add(tid)
+                new_tids.append(tid)
+            print(f"  {len(new_tids)} توییت جدید برای بررسی")
+
+            # فاز ۲: هر tid رو fresh از DOM بخون و پردازش کن
+            for tid in new_tids:
+                # re-fetch article از DOM
+                try:
+                    links = driver.find_elements(By.CSS_SELECTOR, f"a[href*='/status/{tid}']")
+                    article = None
+                    for link in links:
+                        try:
+                            article = link.find_element(By.XPATH, "./ancestor::article[@data-testid='tweet']")
+                            break
+                        except Exception:
+                            continue
+                    if not article:
+                        print(f"  skip (article گم شد): {tid}")
+                        continue
+                except Exception:
+                    continue
 
                 try:
                     text_els = article.find_elements(By.CSS_SELECTOR, "[data-testid='tweetText']")
@@ -213,7 +253,7 @@ def screenshot_timeline(seen: set) -> list[list[tuple[str, bytes]]]:
                     """,
                         article,
                     )
-                    time.sleep(0.4)
+                    _wait_for_images(driver, article)
 
                     vp_png = driver.get_screenshot_as_png()
                     img = Image.open(io.BytesIO(vp_png))

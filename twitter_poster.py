@@ -89,8 +89,8 @@ async def fetch_and_post(seen: set) -> set:
         tasks = [_send_photo_to_bale(png) for _, png in batch]
         results = await asyncio.gather(*tasks, return_exceptions=True)
         for (tid, _), ok in zip(batch, results):
-            seen.add(tid)
             if ok is True:
+                seen.add(tid)
                 logger.info(f"✅ {tid}")
             else:
                 logger.warning(f"❌ {tid}: {ok}")
