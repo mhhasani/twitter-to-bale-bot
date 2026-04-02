@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import threading
 from datetime import datetime
 from typing import Any, Optional
@@ -107,6 +108,18 @@ class ArchiveBotApp:
         if store:
             self._persist_bot_message(sent, fallback_group_id=chat_id)
         return sent
+
+    @staticmethod
+    def _normalize_reply_punctuation(text: str) -> str:
+        """Keep reply text plain by removing punctuation styles the user doesn't want."""
+        value = (text or "").strip()
+        if not value:
+            return value
+
+        value = value.replace("،", " ").replace(",", " ")
+        value = value.replace("!", " ").replace("！", " ")
+        value = re.sub(r"\s+", " ", value).strip()
+        return value
 
     def can_execute_commands(self, message: Message) -> bool:
         """Allow command execution only for configured user."""
@@ -315,7 +328,8 @@ class ArchiveBotApp:
                 await loading.delete()
             except Exception:
                 pass
-        await self._reply_and_store(message, result, store=True)
+        normalized_result = self._normalize_reply_punctuation(result)
+        await self._reply_and_store(message, normalized_result, store=True)
         return True
 
     async def _handle_reply_to_bot_message(self, message: Message) -> bool:
