@@ -51,6 +51,63 @@ class ArchiveBotApp:
         async def on_callback(callback_query):
             await self.on_callback(callback_query)
 
+    def _persist_bot_message(self, sent_message: Message, fallback_group_id: Optional[int] = None) -> None:
+        """Persist an outgoing bot message to dedicated storage for future reply context."""
+        try:
+            if not sent_message:
+                return
+
+            chat = safe_get_attr(sent_message, "chat")
+            reply_to = safe_get_attr(sent_message, "reply_to_message")
+
+            message_id = safe_get_attr(sent_message, "message_id")
+            group_id = safe_get_attr(chat, "id") or fallback_group_id
+            text = get_message_text_content(sent_message)
+            timestamp = normalize_timestamp(safe_get_attr(sent_message, "date"))
+            reply_to_message_id = safe_get_attr(reply_to, "message_id")
+
+            if not message_id or group_id is None:
+                return
+
+            metadata = {
+                "chat_title": safe_get_attr(chat, "title"),
+                "chat_type": safe_get_attr(chat, "type"),
+                "bot_author_id": safe_get_attr(safe_get_attr(sent_message, "author"), "user_id"),
+                "bot_author_username": safe_get_attr(safe_get_attr(sent_message, "author"), "username"),
+            }
+
+            self.db.add_bot_message(
+                message_id=message_id,
+                group_id=group_id,
+                text=text,
+                timestamp=timestamp,
+                reply_to_message_id=reply_to_message_id,
+                metadata=metadata,
+            )
+        except Exception as exc:
+            logger.error("❌ Failed to persist bot message: %s", exc)
+
+    async def _reply_and_store(self, message: Message, text: str, *, store: bool = True) -> Optional[Message]:
+        """Send reply through Bale Message API and optionally persist it as bot message."""
+        sent = await message.reply(text)
+        if store:
+            self._persist_bot_message(sent, fallback_group_id=safe_get_attr(safe_get_attr(message, "chat"), "id"))
+        return sent
+
+    async def _send_and_store(
+        self,
+        chat_id: int,
+        text: str,
+        *,
+        reply_to_message_id: Optional[int] = None,
+        store: bool = True,
+    ) -> Optional[Message]:
+        """Send a message via bot API and optionally persist it as bot message."""
+        sent = await self.bot.send_message(chat_id, text, reply_to_message_id=reply_to_message_id)
+        if store:
+            self._persist_bot_message(sent, fallback_group_id=chat_id)
+        return sent
+
     def can_execute_commands(self, message: Message) -> bool:
         """Allow command execution only for configured user."""
         author = safe_get_attr(message, "author")
@@ -189,7 +246,7 @@ class ArchiveBotApp:
                 return
 
             target_message_id, reply_text = result
-            await self.bot.send_message(group_id, reply_text, reply_to_message_id=target_message_id)
+            await self._send_and_store(group_id, reply_text, reply_to_message_id=target_message_id, store=True)
             logger.info("✅ [auto-chime] reply sent | group=%s target_msg=%s", group_id, target_message_id)
         except Exception as exc:
             logger.error("❌ [auto-chime] failed | group=%s error=%s", group_id, exc)
@@ -213,17 +270,17 @@ class ArchiveBotApp:
         """Run the same analysis flow used by /ask command."""
         group_id = self.resolve_target_group_id(message)
         if group_id is None:
-            await message.reply("📭 No stored group messages available for analysis.")
+            await self._reply_and_store(message, "📭 No stored group messages available for analysis.")
             return True
 
         normalized_question = (question or "").strip()
         if not normalized_question:
-            await message.reply("❌ Invalid format. Use: /ask your question")
+            await self._reply_and_store(message, "❌ Invalid format. Use: /ask your question")
             return True
 
         if len(normalized_question) > self.config.ask_max_question_chars:
-            await message.reply(
-                f"❌ Question is too long. Max {self.config.ask_max_question_chars} characters allowed."
+            await self._reply_and_store(
+                message, f"❌ Question is too long. Max {self.config.ask_max_question_chars} characters allowed."
             )
             return True
 
@@ -237,7 +294,9 @@ class ArchiveBotApp:
 
         loading = None
         if show_loading:
-            loading = await message.reply("🧠 Analyzing chat context and preparing answer...")
+            loading = await self._reply_and_store(
+                message, "🧠 Analyzing chat context and preparing answer...", store=False
+            )
         result = self.analyzer.ask_question_about_chat(
             group_id,
             normalized_question,
@@ -249,8 +308,46 @@ class ArchiveBotApp:
                 await loading.delete()
             except Exception:
                 pass
-        await message.reply(result)
+        await self._reply_and_store(message, result, store=True)
         return True
+
+    async def _handle_reply_to_bot_message(self, message: Message) -> bool:
+        """Handle user replies to previously sent bot messages with contextual response."""
+        if not self.config.commands_enabled or not self.analyzer or not self.analyzer.is_available():
+            return False
+
+        if not is_group_chat(message):
+            return False
+
+        reply_to = safe_get_attr(message, "reply_to_message")
+        reply_to_message_id = safe_get_attr(reply_to, "message_id")
+        if not reply_to_message_id:
+            return False
+
+        group_id = safe_get_attr(safe_get_attr(message, "chat"), "id")
+        if group_id is None:
+            return False
+
+        bot_message = self.db.get_bot_message(group_id=group_id, message_id=reply_to_message_id)
+        if not bot_message:
+            return False
+
+        user_text = get_message_text_content(message)
+        if not user_text:
+            return False
+
+        bot_text = (bot_message.get("text") or "").strip()
+        contextual_question = (
+            "کاربر در حال ریپلای به پیام قبلی ربات است. "
+            f"پیام قبلی ربات: {bot_text or '[بدون متن]'}\n"
+            f"پیام جدید کاربر: {user_text}\n"
+            "با توجه به پیام قبلی ربات و پیام جدید کاربر، پاسخ کوتاه و مستقیم بده."
+        )
+
+        handled = await self._handle_ask_flow(message, contextual_question, show_loading=False)
+        if handled:
+            logger.info("✅ reply-to-bot flow processed | group=%s reply_to=%s", group_id, reply_to_message_id)
+        return handled
 
     async def handle_command(self, message: Message, text: str) -> bool:
         """Handle supported bot commands."""
@@ -259,24 +356,25 @@ class ArchiveBotApp:
         group_id = self.resolve_target_group_id(message)
 
         if group_id is None and not lower_text.startswith("/start") and not lower_text.startswith("/help"):
-            await message.reply("📭 No stored group messages found yet for this command.")
+            await self._reply_and_store(message, "📭 No stored group messages found yet for this command.")
             return True
 
         if lower_text.startswith("/start"):
-            await message.reply(
+            await self._reply_and_store(
+                message,
                 "👋 Hi! I am a conversation archive and analysis bot.\n"
-                "I store this group's messages so you can query them later.\n\n" + self.build_help_message()
+                "I store this group's messages so you can query them later.\n\n" + self.build_help_message(),
             )
             return True
 
         if lower_text.startswith("/help"):
-            await message.reply(self.build_help_message())
+            await self._reply_and_store(message, self.build_help_message())
             return True
 
         if lower_text.startswith("/stats"):
             stats = self.db.get_group_stats(group_id)
             if not stats or not stats.get("total_messages"):
-                await message.reply("📭 No data stored for this group yet.")
+                await self._reply_and_store(message, "📭 No data stored for this group yet.")
                 return True
 
             top_users = stats.get("top_users", [])[:5]
@@ -294,7 +392,7 @@ class ArchiveBotApp:
                 f"- Active users: {stats.get('active_users', 0)}\n"
                 f"- Most active users:\n{top_users_text}"
             )
-            await message.reply(response)
+            await self._reply_and_store(message, response)
             return True
 
         if lower_text.startswith("/summary"):
@@ -306,22 +404,22 @@ class ArchiveBotApp:
                         self.config.summary_min_hours, min(self.config.summary_max_hours, int(parts[1].strip()))
                     )
                 except ValueError:
-                    await message.reply("❌ Invalid format. Use: /summary 24")
+                    await self._reply_and_store(message, "❌ Invalid format. Use: /summary 24")
                     return True
 
-            loading = await message.reply("🧠 Summarizing recent conversations...")
+            loading = await self._reply_and_store(message, "🧠 Summarizing recent conversations...", store=False)
             result = self.analyzer.summarize_recent_user_messages(requester_id, hours)
             try:
                 await loading.delete()
             except Exception:
                 pass
-            await message.reply(result)
+            await self._reply_and_store(message, result)
             return True
 
         if lower_text.startswith("/ask"):
             parts = lower_text.split(maxsplit=1)
             if len(parts) < 2 or not parts[1].strip():
-                await message.reply("❌ Invalid format. Use: /ask your question")
+                await self._reply_and_store(message, "❌ Invalid format. Use: /ask your question")
                 return True
 
             return await self._handle_ask_flow(message, parts[1], show_loading=True)
@@ -329,16 +427,16 @@ class ArchiveBotApp:
         if lower_text.startswith("/analyze"):
             parts = lower_text.split(maxsplit=1)
             if len(parts) < 2 or not parts[1].strip():
-                await message.reply("❌ Invalid format. Use: /analyze username_or_name")
+                await self._reply_and_store(message, "❌ Invalid format. Use: /analyze username_or_name")
                 return True
 
-            loading = await message.reply("🧠 Analyzing user behavior and persona...")
+            loading = await self._reply_and_store(message, "🧠 Analyzing user behavior and persona...", store=False)
             result = self.analyzer.analyze_user_personality(group_id, parts[1].strip())
             try:
                 await loading.delete()
             except Exception:
                 pass
-            await message.reply(result)
+            await self._reply_and_store(message, result)
             return True
 
         if lower_text.startswith("/export_recent"):
@@ -348,12 +446,12 @@ class ArchiveBotApp:
                 try:
                     count = max(self.config.export_min_count, min(self.config.export_max_count, int(parts[1].strip())))
                 except ValueError:
-                    await message.reply("❌ Invalid format. Use: /export_recent 20")
+                    await self._reply_and_store(message, "❌ Invalid format. Use: /export_recent 20")
                     return True
 
             messages = self.db.get_messages(group_id, limit=count)
             if not messages:
-                await message.reply("📭 No messages available to display.")
+                await self._reply_and_store(message, "📭 No messages available to display.")
                 return True
 
             lines = []
@@ -363,19 +461,19 @@ class ArchiveBotApp:
                 content = (item.get("text") or "[no text]").replace("\n", " ")[:120]
                 lines.append(f"[{ts}] {sender}: {content}")
 
-            await message.reply("📝 Latest messages:\n\n" + "\n".join(lines))
+            await self._reply_and_store(message, "📝 Latest messages:\n\n" + "\n".join(lines))
             return True
 
         if lower_text.startswith("/memorize"):
             if not self.can_execute_commands(message):
-                await message.reply("⛔ Only the authorized user can run /memorize.")
+                await self._reply_and_store(message, "⛔ Only the authorized user can run /memorize.")
                 return True
 
             if group_id is None:
-                await message.reply("📭 No stored group messages available to build memory.")
+                await self._reply_and_store(message, "📭 No stored group messages available to build memory.")
                 return True
 
-            loading = await message.reply("🧠 Reading and summarizing group messages...")
+            loading = await self._reply_and_store(message, "🧠 Reading and summarizing group messages...", store=False)
             try:
                 existing_memory = self.analyzer.db.get_latest_group_memory(group_id)
                 last_msg_id = int((existing_memory or {}).get("last_message_id", 0))
@@ -385,7 +483,7 @@ class ArchiveBotApp:
                         await loading.delete()
                     except Exception:
                         pass
-                    await message.reply("📭 No new messages found for summarization.")
+                    await self._reply_and_store(message, "📭 No new messages found for summarization.")
                     return True
 
                 logger.info("🧠 [/memorize] full refresh started | group=%s pending=%d", group_id, pending)
@@ -395,14 +493,14 @@ class ArchiveBotApp:
                     await loading.delete()
                 except Exception:
                     pass
-                await message.reply("✅ Memory updated.")
+                await self._reply_and_store(message, "✅ Memory updated.")
             except Exception as exc:
                 try:
                     await loading.delete()
                 except Exception:
                     pass
                 logger.error("❌ /memorize failed | group=%s error=%s", group_id, exc)
-                await message.reply(f"❌ Summarization failed: {exc}")
+                await self._reply_and_store(message, f"❌ Summarization failed: {exc}")
             return True
 
         return False
@@ -430,6 +528,9 @@ class ArchiveBotApp:
                     safe_get_attr(safe_get_attr(message, "author"), "user_id"),
                     safe_get_attr(message, "message_id"),
                 )
+
+            if await self._handle_reply_to_bot_message(message):
+                return
 
             # Feature: treat messages containing configured keywords as /ask-style request.
             if (
@@ -479,7 +580,7 @@ class ArchiveBotApp:
         except Exception as exc:
             logger.error("❌ message processing failed: %s", exc)
             try:
-                await message.reply("❌ An error occurred. Please try again.")
+                await self._reply_and_store(message, "❌ An error occurred. Please try again.")
             except Exception:
                 pass
 

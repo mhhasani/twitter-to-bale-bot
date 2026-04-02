@@ -125,11 +125,26 @@ class MessageDatabase:
                 FOREIGN KEY (group_id) REFERENCES groups(group_id)
             )
             """,
+            """
+            CREATE TABLE IF NOT EXISTS bot_messages (
+                message_id INTEGER NOT NULL,
+                group_id INTEGER NOT NULL,
+                text TEXT,
+                timestamp INTEGER NOT NULL,
+                reply_to_message_id INTEGER,
+                metadata TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (message_id, group_id),
+                FOREIGN KEY (group_id) REFERENCES groups(group_id)
+            )
+            """,
             "CREATE INDEX IF NOT EXISTS idx_messages_group_time ON messages(group_id, timestamp)",
             "CREATE INDEX IF NOT EXISTS idx_messages_user ON messages(user_id)",
             "CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(timestamp)",
             "CREATE INDEX IF NOT EXISTS idx_group_memory_group_id ON group_memory(group_id, updated_at)",
             "CREATE INDEX IF NOT EXISTS idx_group_chime_state_updated ON group_chime_state(updated_at)",
+            "CREATE INDEX IF NOT EXISTS idx_bot_messages_group_time ON bot_messages(group_id, timestamp)",
+            "CREATE INDEX IF NOT EXISTS idx_bot_messages_reply_to ON bot_messages(group_id, reply_to_message_id)",
         ]
 
         try:
@@ -219,6 +234,48 @@ class MessageDatabase:
         except Exception as exc:
             logger.error("❌ Error saving message: %s", exc)
             return False
+
+    def add_bot_message(
+        self,
+        message_id: int,
+        group_id: int,
+        text: str,
+        timestamp: int,
+        reply_to_message_id: int = None,
+        metadata: Dict = None,
+    ) -> bool:
+        """Insert or replace an outgoing bot message."""
+        try:
+            metadata_json = json.dumps(self._make_json_safe(metadata), ensure_ascii=False) if metadata else None
+            self._execute_write(
+                """
+                INSERT OR REPLACE INTO bot_messages
+                (message_id, group_id, text, timestamp, reply_to_message_id, metadata)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (message_id, group_id, text, timestamp, reply_to_message_id, metadata_json),
+            )
+            return True
+        except Exception as exc:
+            logger.error("❌ Error saving bot message: %s", exc)
+            return False
+
+    def get_bot_message(self, group_id: int, message_id: int) -> Optional[Dict]:
+        """Return a stored outgoing bot message for a given group/message id."""
+        try:
+            return self._fetch_one(
+                """
+                SELECT *
+                FROM bot_messages
+                WHERE group_id = ? AND message_id = ?
+                LIMIT 1
+                """,
+                (group_id, message_id),
+                decode_metadata=True,
+            )
+        except Exception as exc:
+            logger.error("❌ Error fetching bot message: %s", exc)
+            return None
 
     def get_messages(
         self,
