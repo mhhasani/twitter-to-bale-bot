@@ -600,6 +600,7 @@ class MessageDatabase:
                 FROM messages m
                 JOIN users u ON m.user_id = u.user_id
                 WHERE m.group_id = ? AND m.message_id > ?
+                  AND (m.is_bot_message = 0 OR (m.is_bot_message = 1 AND m.message_type != 'bot_chime'))
                 ORDER BY m.message_id ASC
                 LIMIT ?
             """
@@ -617,6 +618,7 @@ class MessageDatabase:
                     SELECT COUNT(*)
                     FROM messages
                     WHERE group_id = ? AND message_id > ?
+                      AND (is_bot_message = 0 OR (is_bot_message = 1 AND message_type != 'bot_chime'))
                     """,
                     (group_id, last_message_id),
                 ).fetchone()[0]
