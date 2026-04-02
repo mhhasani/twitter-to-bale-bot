@@ -5,6 +5,16 @@ from typing import Any
 
 from bale import Message
 
+# Messages containing any of these keywords are treated like /ask.
+ASK_LIKE_TRIGGER_KEYWORDS = ["پری", "هی ربات", "هی گروک", "@parijoonbot"]
+
+
+def contains_ask_like_keyword(text: str) -> bool:
+    value = (text or "").strip()
+    if not value:
+        return False
+    return any(keyword in value for keyword in ASK_LIKE_TRIGGER_KEYWORDS)
+
 
 def safe_get_attr(obj: Any, attr_name: str, default: Any = None) -> Any:
     """Safely read an attribute from an object."""

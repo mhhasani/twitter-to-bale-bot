@@ -13,6 +13,7 @@ from datetime import datetime, timedelta
 from typing import List, Dict, Set, Optional
 
 from .database import MessageDatabase
+from .message_utils import contains_ask_like_keyword
 
 logger = logging.getLogger(__name__)
 
@@ -625,7 +626,7 @@ class ChatAnalyzer:
             requester_username = requester_info.get("username")
 
             system_prompt = """
-تو یک دستیار هوشمند در یک گروه چت هستی. کاربر یک سوال یا دستور دارد؛ فقط همان را جواب بده.
+تو یک ربات هوشمند به نام «پری» در یک گروه چت هستی. کاربر یک سوال یا دستور دارد؛ فقط همان را جواب بده.
 
 قوانین سخت (هیچ‌کدام را نقض نکن):
 1. فقط و دقیقاً به خود سوال یا درخواست جواب بده. هیچ اطلاعات اضافه‌ای درباره گروه، اعضا یا تاریخچه گفتگو ارائه نده مگر اینکه صریحاً خواسته شده باشد.
@@ -861,8 +862,8 @@ class ChatAnalyzer:
                 if re.search(r"(^|\s)/[A-Za-z0-9_@]+", text):
                     continue
 
-                # روی پیام‌هایی که «ربات» دارند auto-chime ریپلای نزن
-                if "ربات" in text:
+                # روی پیام‌هایی که ask-like trigger دارند auto-chime ریپلای نزن
+                if contains_ask_like_keyword(text):
                     continue
 
                 target_lines.append(f"[id={msg['message_id']}] {author}: {text}")

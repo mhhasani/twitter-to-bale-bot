@@ -13,6 +13,7 @@ from .ai_analyzer import ChatAnalyzer
 from .config import AppConfig
 from .database import MessageDatabase
 from .message_utils import (
+    contains_ask_like_keyword,
     detect_message_type,
     extract_metadata,
     get_message_text_content,
@@ -430,9 +431,13 @@ class ArchiveBotApp:
                     safe_get_attr(message, "message_id"),
                 )
 
-            # Feature: treat messages containing "ربات" as an /ask-style request.
-            contains_bot_keyword = "ربات" in (text or "")
-            if self.config.commands_enabled and contains_bot_keyword and self.analyzer and self.analyzer.is_available():
+            # Feature: treat messages containing configured keywords as /ask-style request.
+            if (
+                self.config.commands_enabled
+                and contains_ask_like_keyword(text)
+                and self.analyzer
+                and self.analyzer.is_available()
+            ):
                 handled_keyword_ask = await self._handle_ask_flow(message, text, show_loading=False)
                 if handled_keyword_ask:
                     logger.info("✅ ask-like keyword flow processed")
