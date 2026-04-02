@@ -75,15 +75,33 @@ class ArchiveBotApp:
                 "chat_type": safe_get_attr(chat, "type"),
                 "bot_author_id": safe_get_attr(safe_get_attr(sent_message, "author"), "user_id"),
                 "bot_author_username": safe_get_attr(safe_get_attr(sent_message, "author"), "username"),
+                "reply_to_message_id": reply_to_message_id,
             }
 
-            self.db.add_bot_message(
+            bot_author = safe_get_attr(sent_message, "author")
+            bot_user_id = safe_get_attr(bot_author, "user_id")
+            bot_username = safe_get_attr(bot_author, "username")
+            bot_first_name = safe_get_attr(bot_author, "first_name") or "پری"
+            bot_last_name = safe_get_attr(bot_author, "last_name")
+
+            if bot_user_id:
+                self.db.add_user(
+                    user_id=bot_user_id,
+                    username=bot_username,
+                    first_name=bot_first_name,
+                    last_name=bot_last_name,
+                    is_bot=True,
+                )
+
+            self.db.add_message(
                 message_id=message_id,
                 group_id=group_id,
+                user_id=int(bot_user_id or 0),
                 text=text,
                 timestamp=timestamp,
-                reply_to_message_id=reply_to_message_id,
+                message_type=detect_message_type(sent_message),
                 metadata=metadata,
+                is_bot_message=True,
             )
         except Exception as exc:
             logger.error("❌ Failed to persist bot message: %s", exc)
@@ -349,17 +367,40 @@ class ArchiveBotApp:
         if group_id is None:
             return False
 
-        bot_message = self.db.get_bot_message(group_id=group_id, message_id=reply_to_message_id)
-        if not bot_message:
+        bot_message = self.db.get_message_by_id(group_id=group_id, message_id=reply_to_message_id)
+        if not bot_message or not bool(bot_message.get("is_bot_message")):
             return False
 
         user_text = get_message_text_content(message)
         if not user_text:
             return False
 
+        chain_depth = max(1, int(self.config.reply_chain_max_depth))
+        chain_messages = self.db.get_reply_chain_context(
+            group_id=group_id,
+            start_message_id=reply_to_message_id,
+            max_depth=chain_depth,
+        )
+
+        def _format_chain_item(item: dict) -> str:
+            sender = (
+                "پری"
+                if item.get("is_bot_message")
+                else (
+                    f"{item.get('first_name') or ''} {item.get('last_name') or ''}".strip()
+                    or item.get("username")
+                    or str(item.get("user_id"))
+                )
+            )
+            body = (item.get("text") or "[بدون متن]").strip()
+            return f"- {sender}: {body}"
+
+        chain_context = "\n".join(_format_chain_item(item) for item in chain_messages) if chain_messages else "-"
+
         bot_text = (bot_message.get("text") or "").strip()
         contextual_question = (
             "کاربر در حال ریپلای به پیام قبلی ربات است. "
+            f"زنجیره ریپلای تا {chain_depth} پیام قبل:\n{chain_context}\n"
             f"پیام قبلی ربات: {bot_text or '[بدون متن]'}\n"
             f"پیام جدید کاربر: {user_text}\n"
             "با توجه به پیام قبلی ربات و پیام جدید کاربر، پاسخ کوتاه و مستقیم بده."

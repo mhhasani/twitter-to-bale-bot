@@ -17,6 +17,7 @@ class MessageDatabase:
         "THEN CAST(strftime('%s', m.timestamp) AS INTEGER) "
         "ELSE CAST(m.timestamp AS INTEGER) END"
     )
+    _DEFAULT_BOT_USER_ID = -100
 
     def __init__(self, db_path: str = "messages.db"):
         self.db_path = db_path
@@ -68,7 +69,7 @@ class MessageDatabase:
 
     def init_database(self):
         """Create tables and indexes if they do not already exist."""
-        schema_statements = [
+        table_statements = [
             """
             CREATE TABLE IF NOT EXISTS groups (
                 group_id INTEGER PRIMARY KEY,
@@ -96,6 +97,7 @@ class MessageDatabase:
                 user_id INTEGER NOT NULL,
                 text TEXT,
                 message_type TEXT DEFAULT 'text',
+                is_bot_message INTEGER NOT NULL DEFAULT 0,
                 timestamp INTEGER NOT NULL,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 metadata TEXT,
@@ -125,38 +127,125 @@ class MessageDatabase:
                 FOREIGN KEY (group_id) REFERENCES groups(group_id)
             )
             """,
-            """
-            CREATE TABLE IF NOT EXISTS bot_messages (
-                message_id INTEGER NOT NULL,
-                group_id INTEGER NOT NULL,
-                text TEXT,
-                timestamp INTEGER NOT NULL,
-                reply_to_message_id INTEGER,
-                metadata TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                PRIMARY KEY (message_id, group_id),
-                FOREIGN KEY (group_id) REFERENCES groups(group_id)
-            )
-            """,
+        ]
+
+        index_statements = [
             "CREATE INDEX IF NOT EXISTS idx_messages_group_time ON messages(group_id, timestamp)",
             "CREATE INDEX IF NOT EXISTS idx_messages_user ON messages(user_id)",
             "CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(timestamp)",
+            "CREATE INDEX IF NOT EXISTS idx_messages_group_bot ON messages(group_id, is_bot_message, timestamp)",
             "CREATE INDEX IF NOT EXISTS idx_group_memory_group_id ON group_memory(group_id, updated_at)",
             "CREATE INDEX IF NOT EXISTS idx_group_chime_state_updated ON group_chime_state(updated_at)",
-            "CREATE INDEX IF NOT EXISTS idx_bot_messages_group_time ON bot_messages(group_id, timestamp)",
-            "CREATE INDEX IF NOT EXISTS idx_bot_messages_reply_to ON bot_messages(group_id, reply_to_message_id)",
         ]
 
         try:
             with self._connect() as connection:
                 cursor = connection.cursor()
-                for statement in schema_statements:
+                for statement in table_statements:
                     cursor.execute(statement)
+
+                # Backward-compatible migration for existing databases.
+                cursor.execute("PRAGMA table_info(messages)")
+                message_columns = {row[1] for row in cursor.fetchall()}
+                if "is_bot_message" not in message_columns:
+                    cursor.execute("ALTER TABLE messages ADD COLUMN is_bot_message INTEGER NOT NULL DEFAULT 0")
+
+                self._migrate_legacy_bot_messages(cursor)
+
+                for statement in index_statements:
+                    cursor.execute(statement)
+
                 connection.commit()
             logger.info("✅ Database initialized/updated successfully")
         except Exception as exc:
             logger.error("❌ Error initializing database: %s", exc)
             raise
+
+    def _migrate_legacy_bot_messages(self, cursor: sqlite3.Cursor) -> None:
+        """Move rows from legacy bot_messages table into messages and drop old table."""
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='bot_messages' LIMIT 1")
+        if not cursor.fetchone():
+            return
+
+        logger.info("🔄 Legacy bot_messages table detected. Starting migration...")
+
+        cursor.execute(
+            """
+            INSERT OR IGNORE INTO users (user_id, username, first_name, last_name, is_bot)
+            VALUES (?, ?, ?, ?, 1)
+            """,
+            (self._DEFAULT_BOT_USER_ID, "pari_bot", "پری", None),
+        )
+
+        cursor.execute("PRAGMA table_info(bot_messages)")
+        legacy_columns = {row[1] for row in cursor.fetchall()}
+        has_reply_to = "reply_to_message_id" in legacy_columns
+        has_metadata = "metadata" in legacy_columns
+
+        select_fields = ["message_id", "group_id", "text", "timestamp"]
+        select_fields.append("reply_to_message_id" if has_reply_to else "NULL AS reply_to_message_id")
+        select_fields.append("metadata" if has_metadata else "NULL AS metadata")
+
+        cursor.execute(
+            f"""
+            SELECT {", ".join(select_fields)}
+            FROM bot_messages
+            ORDER BY timestamp ASC, message_id ASC
+            """
+        )
+        legacy_rows = cursor.fetchall()
+        migrated_count = 0
+
+        for message_id, group_id, text, timestamp, reply_to_message_id, metadata in legacy_rows:
+            parsed_metadata: Dict[str, Any] = {}
+            if metadata:
+                try:
+                    parsed_metadata = json.loads(metadata)
+                except Exception:
+                    parsed_metadata = {}
+
+            if reply_to_message_id and "reply_to_message_id" not in parsed_metadata:
+                parsed_metadata["reply_to_message_id"] = reply_to_message_id
+
+            bot_user_id = parsed_metadata.get("bot_author_id") or self._DEFAULT_BOT_USER_ID
+            try:
+                bot_user_id = int(bot_user_id)
+            except Exception:
+                bot_user_id = self._DEFAULT_BOT_USER_ID
+
+            bot_username = parsed_metadata.get("bot_author_username")
+
+            cursor.execute(
+                """
+                INSERT OR IGNORE INTO users (user_id, username, first_name, last_name, is_bot)
+                VALUES (?, ?, ?, ?, 1)
+                """,
+                (bot_user_id, bot_username, "پری", None),
+            )
+
+            cursor.execute(
+                """
+                INSERT OR IGNORE INTO messages
+                (message_id, group_id, user_id, text, message_type, is_bot_message, timestamp, metadata)
+                VALUES (?, ?, ?, ?, ?, 1, ?, ?)
+                """,
+                (
+                    int(message_id),
+                    int(group_id),
+                    int(bot_user_id),
+                    text,
+                    "text",
+                    int(timestamp),
+                    json.dumps(parsed_metadata, ensure_ascii=False) if parsed_metadata else None,
+                ),
+            )
+            migrated_count += cursor.rowcount or 0
+
+        cursor.execute("DROP TABLE IF EXISTS bot_messages")
+        logger.info(
+            "✅ Legacy bot_messages migrated: %s row(s) moved, table dropped",
+            migrated_count,
+        )
 
     def _make_json_safe(self, value):
         """Recursively convert values into JSON-serializable structures."""
@@ -217,6 +306,7 @@ class MessageDatabase:
         timestamp: int,
         message_type: str = "text",
         metadata: Dict = None,
+        is_bot_message: bool = False,
     ) -> bool:
         """Insert or replace a message record."""
         try:
@@ -224,58 +314,25 @@ class MessageDatabase:
             self._execute_write(
                 """
                 INSERT OR REPLACE INTO messages
-                (message_id, group_id, user_id, text, message_type, timestamp, metadata)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                (message_id, group_id, user_id, text, message_type, is_bot_message, timestamp, metadata)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (message_id, group_id, user_id, text, message_type, timestamp, metadata_json),
+                (
+                    message_id,
+                    group_id,
+                    user_id,
+                    text,
+                    message_type,
+                    1 if is_bot_message else 0,
+                    timestamp,
+                    metadata_json,
+                ),
             )
             logger.info("✅ Message #%s from group %s saved", message_id, group_id)
             return True
         except Exception as exc:
             logger.error("❌ Error saving message: %s", exc)
             return False
-
-    def add_bot_message(
-        self,
-        message_id: int,
-        group_id: int,
-        text: str,
-        timestamp: int,
-        reply_to_message_id: int = None,
-        metadata: Dict = None,
-    ) -> bool:
-        """Insert or replace an outgoing bot message."""
-        try:
-            metadata_json = json.dumps(self._make_json_safe(metadata), ensure_ascii=False) if metadata else None
-            self._execute_write(
-                """
-                INSERT OR REPLACE INTO bot_messages
-                (message_id, group_id, text, timestamp, reply_to_message_id, metadata)
-                VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (message_id, group_id, text, timestamp, reply_to_message_id, metadata_json),
-            )
-            return True
-        except Exception as exc:
-            logger.error("❌ Error saving bot message: %s", exc)
-            return False
-
-    def get_bot_message(self, group_id: int, message_id: int) -> Optional[Dict]:
-        """Return a stored outgoing bot message for a given group/message id."""
-        try:
-            return self._fetch_one(
-                """
-                SELECT *
-                FROM bot_messages
-                WHERE group_id = ? AND message_id = ?
-                LIMIT 1
-                """,
-                (group_id, message_id),
-                decode_metadata=True,
-            )
-        except Exception as exc:
-            logger.error("❌ Error fetching bot message: %s", exc)
-            return None
 
     def get_messages(
         self,
@@ -290,6 +347,7 @@ class MessageDatabase:
                 SELECT
                     m.message_id, m.group_id, m.user_id, m.text,
                     m.message_type,
+                    m.is_bot_message,
                     {self._TIMESTAMP_EXPR} AS timestamp,
                     m.metadata,
                     u.username, u.first_name, u.last_name
@@ -324,7 +382,7 @@ class MessageDatabase:
                 """
                 SELECT
                     m.message_id, m.group_id, m.user_id, m.text,
-                    m.message_type, m.timestamp, m.metadata,
+                    m.message_type, m.is_bot_message, m.timestamp, m.metadata,
                     u.username, u.first_name, u.last_name
                 FROM messages m
                 JOIN users u ON m.user_id = u.user_id
@@ -354,6 +412,7 @@ class MessageDatabase:
                     m.user_id,
                     m.text,
                     m.message_type,
+                    m.is_bot_message,
                     {self._TIMESTAMP_EXPR} AS timestamp,
                     m.metadata,
                     u.username,
@@ -393,7 +452,10 @@ class MessageDatabase:
                 cursor.execute("SELECT COUNT(*) FROM messages WHERE group_id = ?", (group_id,))
                 total_messages = cursor.fetchone()[0]
 
-                cursor.execute("SELECT COUNT(DISTINCT user_id) FROM messages WHERE group_id = ?", (group_id,))
+                cursor.execute(
+                    "SELECT COUNT(DISTINCT user_id) FROM messages WHERE group_id = ? AND is_bot_message = 0",
+                    (group_id,),
+                )
                 active_users = cursor.fetchone()[0]
 
                 cursor.execute("SELECT MIN(timestamp), MAX(timestamp) FROM messages WHERE group_id = ?", (group_id,))
@@ -404,7 +466,7 @@ class MessageDatabase:
                     SELECT u.user_id, u.username, u.first_name, COUNT(m.message_id) as message_count
                     FROM messages m
                     JOIN users u ON m.user_id = u.user_id
-                    WHERE m.group_id = ?
+                    WHERE m.group_id = ? AND m.is_bot_message = 0
                     GROUP BY u.user_id
                     ORDER BY message_count DESC
                     LIMIT 10
@@ -441,7 +503,7 @@ class MessageDatabase:
                     MAX({self._TIMESTAMP_EXPR}) AS last_activity_ts
                 FROM messages m
                 JOIN users u ON m.user_id = u.user_id
-                WHERE m.group_id = ?
+                WHERE m.group_id = ? AND m.is_bot_message = 0
                 GROUP BY u.user_id, u.username, u.first_name, u.last_name, u.is_bot
                 ORDER BY message_count DESC
                 LIMIT ?
@@ -467,6 +529,7 @@ class MessageDatabase:
                     SELECT
                         m.message_id, m.group_id, m.user_id, m.text,
                         m.message_type,
+                        m.is_bot_message,
                         {self._TIMESTAMP_EXPR} AS timestamp,
                         m.metadata,
                         u.username, u.first_name, u.last_name
@@ -530,6 +593,7 @@ class MessageDatabase:
                 SELECT
                     m.message_id, m.group_id, m.user_id, m.text,
                     m.message_type,
+                    m.is_bot_message,
                     {self._TIMESTAMP_EXPR} AS timestamp,
                     m.metadata,
                     u.username, u.first_name, u.last_name
@@ -631,6 +695,7 @@ class MessageDatabase:
                 SELECT
                     m.message_id, m.group_id, m.user_id, m.text,
                     m.message_type,
+                    m.is_bot_message,
                     {self._TIMESTAMP_EXPR} AS timestamp,
                     m.metadata,
                     u.username, u.first_name, u.last_name,
@@ -653,6 +718,58 @@ class MessageDatabase:
         except Exception as exc:
             logger.error("❌ Error searching related messages: %s", exc)
             return []
+
+    @staticmethod
+    def _extract_reply_to_message_id(message: Dict) -> Optional[int]:
+        metadata = message.get("metadata") or {}
+        if isinstance(metadata, dict):
+            direct_reply_to = metadata.get("reply_to_message_id")
+            if direct_reply_to:
+                return int(direct_reply_to)
+
+            nested = metadata.get("message")
+            if isinstance(nested, dict) and nested.get("reply_to_message_id"):
+                return int(nested.get("reply_to_message_id"))
+
+        return None
+
+    def get_message_by_id(self, group_id: int, message_id: int) -> Optional[Dict]:
+        """Fetch one message by id from the merged messages table."""
+        try:
+            query = f"""
+                SELECT
+                    m.message_id, m.group_id, m.user_id, m.text,
+                    m.message_type, m.is_bot_message,
+                    {self._TIMESTAMP_EXPR} AS timestamp,
+                    m.metadata,
+                    u.username, u.first_name, u.last_name
+                FROM messages m
+                LEFT JOIN users u ON m.user_id = u.user_id
+                WHERE m.group_id = ? AND m.message_id = ?
+                LIMIT 1
+            """
+            return self._fetch_one(query, (group_id, message_id), decode_metadata=True)
+        except Exception as exc:
+            logger.error("❌ Error fetching message by id: %s", exc)
+            return None
+
+    def get_reply_chain_context(self, group_id: int, start_message_id: int, max_depth: int = 5) -> List[Dict]:
+        """Get up to max_depth previous reply-chain messages including the start message."""
+        chain: List[Dict] = []
+        current_message_id = int(start_message_id)
+        depth = 0
+
+        while current_message_id and depth < max_depth:
+            message = self.get_message_by_id(group_id, current_message_id)
+            if not message:
+                break
+
+            chain.append(message)
+            current_message_id = self._extract_reply_to_message_id(message) or 0
+            depth += 1
+
+        chain.reverse()
+        return chain
 
     def get_all_groups(self) -> List[Dict]:
         """Return all groups ordered by latest update."""

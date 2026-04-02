@@ -20,6 +20,7 @@ class AppConfig:
     summary_max_hours: int
     ask_default_hours: int
     ask_max_question_chars: int
+    reply_chain_max_depth: int
     export_default_count: int
     export_min_count: int
     export_max_count: int
@@ -50,6 +51,7 @@ class AppConfig:
             summary_max_hours=int(os.getenv("SUMMARY_MAX_HOURS", "168")),
             ask_default_hours=int(os.getenv("ASK_DEFAULT_HOURS", "72")),
             ask_max_question_chars=int(os.getenv("ASK_MAX_QUESTION_CHARS", "500")),
+            reply_chain_max_depth=max(1, int(os.getenv("REPLY_CHAIN_MAX_DEPTH", "5"))),
             export_default_count=int(os.getenv("EXPORT_DEFAULT_COUNT", "20")),
             export_min_count=int(os.getenv("EXPORT_MIN_COUNT", "1")),
             export_max_count=int(os.getenv("EXPORT_MAX_COUNT", "100")),
