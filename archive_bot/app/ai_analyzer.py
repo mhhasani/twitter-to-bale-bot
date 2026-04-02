@@ -861,6 +861,10 @@ class ChatAnalyzer:
                 if re.search(r"(^|\s)/[A-Za-z0-9_@]+", text):
                     continue
 
+                # روی پیام‌هایی که «ربات» دارند auto-chime ریپلای نزن
+                if "ربات" in text:
+                    continue
+
                 target_lines.append(f"[id={msg['message_id']}] {author}: {text}")
                 candidate_messages.append(msg)
 
