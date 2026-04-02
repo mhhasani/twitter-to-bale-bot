@@ -266,7 +266,13 @@ class ArchiveBotApp:
             "Note: only messages with text/caption are stored to reduce data usage."
         )
 
-    async def _handle_ask_flow(self, message: Message, question: str, show_loading: bool = True) -> bool:
+    async def _handle_ask_flow(
+        self,
+        message: Message,
+        question: str,
+        show_loading: bool = True,
+        length_check_text: Optional[str] = None,
+    ) -> bool:
         """Run the same analysis flow used by /ask command."""
         group_id = self.resolve_target_group_id(message)
         if group_id is None:
@@ -278,7 +284,8 @@ class ArchiveBotApp:
             await self._reply_and_store(message, "❌ Invalid format. Use: /ask your question")
             return True
 
-        if len(normalized_question) > self.config.ask_max_question_chars:
+        text_for_length_check = (length_check_text if length_check_text is not None else normalized_question).strip()
+        if len(text_for_length_check) > self.config.ask_max_question_chars:
             await self._reply_and_store(
                 message, f"❌ Question is too long. Max {self.config.ask_max_question_chars} characters allowed."
             )
@@ -344,7 +351,12 @@ class ArchiveBotApp:
             "با توجه به پیام قبلی ربات و پیام جدید کاربر، پاسخ کوتاه و مستقیم بده."
         )
 
-        handled = await self._handle_ask_flow(message, contextual_question, show_loading=False)
+        handled = await self._handle_ask_flow(
+            message,
+            contextual_question,
+            show_loading=False,
+            length_check_text=user_text,
+        )
         if handled:
             logger.info("✅ reply-to-bot flow processed | group=%s reply_to=%s", group_id, reply_to_message_id)
         return handled
