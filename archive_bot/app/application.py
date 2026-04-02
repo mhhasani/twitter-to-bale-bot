@@ -98,7 +98,7 @@ class ArchiveBotApp:
                     is_bot=True,
                 )
 
-            self.db.add_message(
+            stored = self.db.add_message(
                 message_id=message_id,
                 group_id=group_id,
                 user_id=int(bot_user_id or 0),
@@ -108,6 +108,9 @@ class ArchiveBotApp:
                 metadata=metadata,
                 is_bot_message=True,
             )
+
+            if stored:
+                self.maybe_auto_memorize_group(int(group_id))
         except Exception as exc:
             logger.error("❌ Failed to persist bot message: %s", exc)
 
