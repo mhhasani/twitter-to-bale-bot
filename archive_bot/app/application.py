@@ -208,6 +208,49 @@ class ArchiveBotApp:
             "Note: only messages with text/caption are stored to reduce data usage."
         )
 
+    async def _handle_ask_flow(self, message: Message, question: str, show_loading: bool = True) -> bool:
+        """Run the same analysis flow used by /ask command."""
+        group_id = self.resolve_target_group_id(message)
+        if group_id is None:
+            await message.reply("📭 No stored group messages available for analysis.")
+            return True
+
+        normalized_question = (question or "").strip()
+        if not normalized_question:
+            await message.reply("❌ Invalid format. Use: /ask your question")
+            return True
+
+        if len(normalized_question) > self.config.ask_max_question_chars:
+            await message.reply(
+                f"❌ Question is too long. Max {self.config.ask_max_question_chars} characters allowed."
+            )
+            return True
+
+        author = safe_get_attr(message, "author")
+        requester_info = {
+            "user_id": safe_get_attr(author, "user_id"),
+            "username": safe_get_attr(author, "username"),
+            "first_name": safe_get_attr(author, "first_name"),
+            "last_name": safe_get_attr(author, "last_name"),
+        }
+
+        loading = None
+        if show_loading:
+            loading = await message.reply("🧠 Analyzing chat context and preparing answer...")
+        result = self.analyzer.ask_question_about_chat(
+            group_id,
+            normalized_question,
+            hours=self.config.ask_default_hours,
+            requester_info=requester_info,
+        )
+        if loading is not None:
+            try:
+                await loading.delete()
+            except Exception:
+                pass
+        await message.reply(result)
+        return True
+
     async def handle_command(self, message: Message, text: str) -> bool:
         """Handle supported bot commands."""
         lower_text = text.strip()
@@ -275,43 +318,12 @@ class ArchiveBotApp:
             return True
 
         if lower_text.startswith("/ask"):
-            if group_id is None:
-                await message.reply("📭 No stored group messages available for analysis.")
-                return True
-
             parts = lower_text.split(maxsplit=1)
             if len(parts) < 2 or not parts[1].strip():
                 await message.reply("❌ Invalid format. Use: /ask your question")
                 return True
 
-            question = parts[1].strip()
-            if len(question) > self.config.ask_max_question_chars:
-                await message.reply(
-                    f"❌ Question is too long. Max {self.config.ask_max_question_chars} characters allowed."
-                )
-                return True
-
-            author = safe_get_attr(message, "author")
-            requester_info = {
-                "user_id": safe_get_attr(author, "user_id"),
-                "username": safe_get_attr(author, "username"),
-                "first_name": safe_get_attr(author, "first_name"),
-                "last_name": safe_get_attr(author, "last_name"),
-            }
-
-            loading = await message.reply("🧠 Analyzing chat context and preparing answer...")
-            result = self.analyzer.ask_question_about_chat(
-                group_id,
-                question,
-                hours=self.config.ask_default_hours,
-                requester_info=requester_info,
-            )
-            try:
-                await loading.delete()
-            except Exception:
-                pass
-            await message.reply(result)
-            return True
+            return await self._handle_ask_flow(message, parts[1], show_loading=True)
 
         if lower_text.startswith("/analyze"):
             parts = lower_text.split(maxsplit=1)
@@ -417,6 +429,14 @@ class ArchiveBotApp:
                     safe_get_attr(safe_get_attr(message, "author"), "user_id"),
                     safe_get_attr(message, "message_id"),
                 )
+
+            # Feature: treat messages containing "ربات" as an /ask-style request.
+            contains_bot_keyword = "ربات" in (text or "")
+            if self.config.commands_enabled and contains_bot_keyword and self.analyzer and self.analyzer.is_available():
+                handled_keyword_ask = await self._handle_ask_flow(message, text, show_loading=False)
+                if handled_keyword_ask:
+                    logger.info("✅ ask-like keyword flow processed")
+                    return
 
             if is_group_chat(message):
                 if was_stored:
