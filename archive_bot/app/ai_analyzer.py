@@ -37,10 +37,10 @@ class ChatAnalyzer:
         self.memory_summary_max_tokens = int(os.getenv("MEMORY_SUMMARY_MAX_TOKENS", "5000"))
         self.request_timeout_seconds = int(os.getenv("MODEL_REQUEST_TIMEOUT_SECONDS", "300"))
         self.request_retry_count = int(os.getenv("MODEL_REQUEST_RETRY_COUNT", "2"))
-        self.memory_preview_chars = int(os.getenv("MEMORY_COMPRESS_PREVIEW_CHARS", "150"))
-        self.auto_memory_preview_chars = int(os.getenv("AUTO_MEMORY_PREVIEW_CHARS", "110"))
-        self.auto_memory_prev_summary_chars = int(os.getenv("AUTO_MEMORY_PREV_SUMMARY_CHARS", "3000"))
-        self.auto_memory_max_tokens = int(os.getenv("AUTO_MEMORY_MAX_TOKENS", "2500"))
+        self.memory_preview_chars = int(os.getenv("MEMORY_COMPRESS_PREVIEW_CHARS", "500"))
+        self.auto_memory_preview_chars = int(os.getenv("AUTO_MEMORY_PREVIEW_CHARS", "300"))
+        self.auto_memory_prev_summary_chars = int(os.getenv("AUTO_MEMORY_PREV_SUMMARY_CHARS", "20000"))
+        self.auto_memory_max_tokens = int(os.getenv("AUTO_MEMORY_MAX_TOKENS", "50000"))
         self.ask_group_users_limit = int(os.getenv("ASK_GROUP_USERS_LIMIT", "150"))
         self.ask_relevant_messages_limit = int(os.getenv("ASK_RELEVANT_MESSAGES_LIMIT", "24"))
         self.ask_recent_messages_limit = int(os.getenv("ASK_RECENT_MESSAGES_LIMIT", "14"))
@@ -359,9 +359,9 @@ class ChatAnalyzer:
             )
 
             # Use compressed previews to reduce prompt/token size and speed up the model call
-            # Hard cap: at most first 200 chars of each message during memorize flow
+            # Hard cap: at most first 500 chars of each message during memorize flow
             base_preview = preview_chars if preview_chars is not None else self.memory_preview_chars
-            per_message_preview_chars = min(base_preview, 200)
+            per_message_preview_chars = min(base_preview, 500)
             new_content = self._compress_messages(new_messages, preview_chars=per_message_preview_chars)
             previous_summary = current_summary or "هنوز خلاصه‌ای ثبت نشده است."
             if previous_summary_chars and len(previous_summary) > previous_summary_chars:
@@ -373,11 +373,11 @@ class ChatAnalyzer:
 قوانین:
 1. فقط بر اساس خلاصه قبلی و پیام‌های جدید بنویس.
 2. هیچ چیز را حدس نزن و اگر چیزی مبهم است با احتیاط خلاصه کن.
-3. خروجی باید فشرده، واقعی و قابل اتکا برای پاسخ‌دادن به سوال‌های بعدی باشد.
+3. خروجی باید واقعی و قابل اتکا برای پاسخ‌دادن به سوال‌های بعدی باشد.
 4. این حافظه باید موضوعات تکراری، شوخی‌های مهم، روابط بین افراد، نقش افراد، اختلاف‌نظرها و نکات ماندگار را نگه دارد.
 5. چیزهای کم‌اهمیت و گذرا را حذف کن.
 6. خروجی را فارسی و پیوسته بنویس.
-7. طول خروجی می‌تواند زیاد باشد و در صورت نیاز تا حدود 10000 کاراکتر هم مجاز است.
+7. محدودیت کاراکتر نداری
 """
 
             user_prompt = f"""
@@ -388,7 +388,7 @@ class ChatAnalyzer:
 {new_content}
 
 لطفاً یک خلاصه تجمعی جدید و کامل بساز که هم خلاصه قبلی را حفظ کند هم نکات مهم پیام‌های جدید را اضافه کند.
-در این خروجی محدودیت کوتاهی نداریم و در صورت نیاز می‌توانی مفصل بنویسی (تا حدود 10000 کاراکتر).
+همه اطلاعات مهم و کلیدی را حفظ کن و هیچ جزئیات مهمی را گم نکن.
 """
 
             logger.info("🧠 [حافظه] ارسال به مدل برای خلاصه‌سازی... | group=%s", group_id)
@@ -589,9 +589,9 @@ class ChatAnalyzer:
             group_users = self.db.get_group_users(group_id, limit=self.ask_group_users_limit)
             requester_info = requester_info or {}
 
-            validation_error = self._validate_group_question(question, group_users)
-            if validation_error:
-                return validation_error
+            # validation_error = self._validate_group_question(question, group_users)
+            # if validation_error:
+            #     return validation_error
 
             context = self._build_group_context(group_id, question)
             memory = context.get("memory") or {}
